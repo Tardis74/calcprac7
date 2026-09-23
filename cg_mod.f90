@@ -2,7 +2,7 @@ module cg_mod
     use precision_mod
     implicit none
     private
-    public :: cg_minimize
+    public :: cg_minimize, func_iface
 
     abstract interface
         function func_iface(x) result(f)
@@ -12,25 +12,29 @@ module cg_mod
         end function func_iface
     end interface
 
+    ! Параметры сильного Вольфа.
     real(dp), parameter :: c1 = 1.0e-4_dp
     real(dp), parameter :: c2 = 0.9_dp
-    integer,  parameter :: max_ls   = 30
-    integer,  parameter :: max_zoom = 30
+
+    integer, parameter :: max_ls   = 30   ! итераций расширения шага
+    integer, parameter :: max_zoom = 30   ! итераций бисекции
 
 contains
 
-	function cg_minimize(f, x0, eps, max_iter, restart_period, restart_gamma, &
-                         beta_method, status, iterations, ftol) result(xmin)
+    function cg_minimize(f, x0, eps, max_iter, restart_period, restart_gamma, &
+                         beta_method, status, iterations, ftol, gnorm_final) &
+                         result(xmin)
         procedure(func_iface) :: f
         real(dp), intent(in) :: x0(:)
         real(dp), intent(in) :: eps
-        integer, intent(in),  optional :: max_iter
-        integer, intent(in),  optional :: restart_period
-        real(dp), intent(in),  optional :: restart_gamma
-        integer, intent(in),  optional :: beta_method
+        integer, intent(in), optional :: max_iter
+        integer, intent(in), optional :: restart_period
+        real(dp), intent(in), optional :: restart_gamma
+        integer, intent(in), optional :: beta_method
         integer, intent(out), optional :: status
         integer, intent(out), optional :: iterations
-        real(dp), intent(in),  optional :: ftol
+        real(dp), intent(in), optional :: ftol
+        real(dp), intent(out), optional :: gnorm_final
 
         real(dp), allocatable :: xmin(:)
 
@@ -39,30 +43,30 @@ contains
         real(dp) :: tol_f, f_prev, f_cur, f_best
         real(dp), allocatable :: x(:), g(:), p(:), g_prev(:)
         real(dp), allocatable :: x_new(:), g_new(:)
-        real(dp), allocatable :: x_best(:)              ! лучшая найденная точка
+        real(dp), allocatable :: x_best(:), g_best(:)
         logical :: ok, restart, converged
 
         n = size(x0)
         maxit = 1000
         if (present(max_iter)) maxit = max_iter
-        period  = n
+        period = n
         if (present(restart_period)) period = restart_period
-        gamma   = 0.2_dp
+        gamma = 0.2_dp
         if (present(restart_gamma)) gamma = restart_gamma
-        method  = 2
+        method = 2
         if (present(beta_method)) method = beta_method
         tol = eps
         tol_f = 1.0e-12_dp
-        if (present(ftol)) tol_f = ftol
+        if (present(ftol)) tol_f   = ftol
 
-        allocate(x(n), g(n), p(n), g_prev(n), x_new(n), g_new(n), x_best(n))
+        allocate(x(n), g(n), p(n), g_prev(n), x_new(n), g_new(n), &
+                 x_best(n), g_best(n))
         x = x0
         call numerical_gradient(f, x, g)
         p = -g
         iter = 0
         gnorm2 = dot_product(g, g)
 
-        ! "лучшее" значение по функции.
         f_cur = f(x)
         f_best = f_cur
         x_best = x
@@ -87,24 +91,20 @@ contains
             iter = iter + 1
             gnorm2 = dot_product(g, g)
 
-            ! Обновление лучшей точки, если функция уменьшилась.
             if (f_cur < f_best) then
                 f_best = f_cur
                 x_best = x
             end if
 
-            ! Критерии остановки
             if (sqrt(gnorm2) <= tol) then
                 converged = .true.
                 exit
             end if
             if (abs(f_cur - f_prev) <= tol_f * (1.0_dp + abs(f_prev))) then
-                ! Отсутствие дальнейшего убывания
                 converged = .true.
                 exit
             end if
 
-            ! Вычисление beta
             if (method == 1) then
                 beta = gnorm2 / dot_product(g_prev, g_prev)
             else
@@ -112,7 +112,6 @@ contains
                 if (beta < 0.0_dp) beta = 0.0_dp
             end if
 
-            ! Перезапуск
             restart = .false.
             if (period > 0) then
                 if (mod(iter, period) == 0) restart = .true.
@@ -126,9 +125,14 @@ contains
             end if
         end do
 
-        ! Лучшая найденная точка.
         allocate(xmin(n))
         xmin = x_best
+
+        ! Норма градиента в возвращаемой точке
+        if (present(gnorm_final)) then
+            call numerical_gradient(f, x_best, g_best)
+            gnorm_final = sqrt(dot_product(g_best, g_best))
+        end if
 
         if (present(status)) then
             if (converged) then
@@ -140,10 +144,10 @@ contains
         if (present(iterations)) iterations = iter
     end function cg_minimize
 
-    ! Линейный поиск
+    ! линейный поиск 
     subroutine line_search(f, x, p, g, alpha, x_new, g_new, f_new, success)
         procedure(func_iface) :: f
-        real(dp), intent(in)  :: x(:), p(:), g(:)
+        real(dp), intent(in) :: x(:), p(:), g(:)
         real(dp), intent(out) :: alpha, x_new(:), g_new(:), f_new
         logical, intent(out) :: success
 
@@ -183,8 +187,8 @@ contains
                 return
             end if
             alpha_prev = alpha_i
-            phi_prev   = phi_i
-            alpha_i    = min(alpha_max, alpha_i * 2.0_dp)
+            phi_prev = phi_i
+            alpha_i = min(alpha_max, alpha_i * 2.0_dp)
         end do
 
         success = .false.
@@ -197,24 +201,24 @@ contains
     subroutine zoom(f, x, p, phi0, derphi0, alpha_lo_in, alpha_hi_in, &
                     alpha_out, x_new, g_new, f_new, success)
         procedure(func_iface) :: f
-        real(dp), intent(in)  :: x(:), p(:), phi0, derphi0, alpha_lo_in, alpha_hi_in
+        real(dp), intent(in) :: x(:), p(:), phi0, derphi0, alpha_lo_in, alpha_hi_in
         real(dp), intent(out) :: alpha_out, x_new(:), g_new(:), f_new
-        logical,  intent(out) :: success
+        logical, intent(out) :: success
 
         real(dp) :: alpha_lo, alpha_hi, alpha, phi_lo, phi, derphi
-        integer  :: it
+        integer :: it
         real(dp) :: xt(size(x))
 
         alpha_lo = alpha_lo_in
         alpha_hi = alpha_hi_in
-        xt       = x + alpha_lo * p
-        phi_lo   = f(xt)
-        success  = .false.
+        xt = x + alpha_lo * p
+        phi_lo = f(xt)
+        success = .false.
 
         do it = 1, max_zoom
             alpha = 0.5_dp * (alpha_lo + alpha_hi)
-            xt    = x + alpha * p
-            phi   = f(xt)
+            xt = x + alpha * p
+            phi = f(xt)
 
             if (phi > phi0 + c1 * alpha * derphi0 .or. phi >= phi_lo) then
                 alpha_hi = alpha
@@ -227,7 +231,7 @@ contains
                 end if
                 if (derphi * (alpha_hi - alpha_lo) >= 0.0_dp) alpha_hi = alpha_lo
                 alpha_lo = alpha
-                phi_lo   = phi
+                phi_lo = phi
             end if
             if (abs(alpha_hi - alpha_lo) < 1.0e-12_dp) exit
         end do
@@ -240,16 +244,16 @@ contains
         success = (f_new < phi0)
     end subroutine zoom
 
-    ! Численный градиент
+    ! численный градиент (центральная разность)
     subroutine numerical_gradient(f, x, g)
         procedure(func_iface) :: f
-        real(dp), intent(in) :: x(:)
+        real(dp), intent(in)  :: x(:)
         real(dp), intent(out) :: g(:)
         integer :: i, n
         real(dp) :: xi, h, fp, fm
         real(dp) :: xt(size(x))
 
-        n = size(x)
+        n  = size(x)
         xt = x
         do i = 1, n
             xi = x(i)
